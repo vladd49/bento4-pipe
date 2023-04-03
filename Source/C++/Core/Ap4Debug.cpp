@@ -48,7 +48,7 @@ const int AP4_DEBUG_MAX_BUFFER = 1024;
 static void
 AP4_Print(const char* message)
 {
-    printf("%s", message);
+    fprintf(stderr, "%s", message);
 }
 
 /*----------------------------------------------------------------------

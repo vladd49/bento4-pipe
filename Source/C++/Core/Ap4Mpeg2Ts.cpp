@@ -215,7 +215,8 @@ AP4_Mpeg2TsWriter::Stream::WritePacketHeader(bool            payload_start,
                                              unsigned int&   payload_size,
                                              bool            with_pcr,
                                              AP4_UI64        pcr,
-                                             AP4_ByteStream& output)
+                                             AP4_ByteStream& output,
+                                             bool			   with_rai)
 {
     unsigned char header[4];
     header[0] = AP4_MPEG2TS_SYNC_BYTE;
@@ -250,7 +251,7 @@ AP4_Mpeg2TsWriter::Stream::WritePacketHeader(bool            payload_start,
         } else {
             // two or more bytes (stuffing and/or PCR)
             output.WriteUI08((AP4_UI08)(adaptation_field_size-1));
-            output.WriteUI08(with_pcr?(1<<4):0);
+            output.WriteUI08(with_pcr ? ( with_rai ? (0x10 | 0x40) : (0x10)):0);
             unsigned int pcr_size = 0;
             if (with_pcr) {
                 pcr_size = AP4_MPEG2TS_PCR_ADAPTATION_SIZE;
@@ -280,7 +281,8 @@ AP4_Mpeg2TsWriter::SampleStream::WritePES(const unsigned char* data,
                                           bool                 with_dts, 
                                           AP4_UI64             pts, 
                                           bool                 with_pcr, 
-                                          AP4_ByteStream&      output)
+                                          AP4_ByteStream&      output,
+                                          bool					 with_rai)
 {
     // ISO/IEC 13818-1 section 2.7.5 says a DTS shall appear only if the
     // decoding time differs from the presentation time.
@@ -338,13 +340,13 @@ AP4_Mpeg2TsWriter::SampleStream::WritePES(const unsigned char* data,
         if (payload_size > AP4_MPEG2TS_PACKET_PAYLOAD_SIZE) payload_size = AP4_MPEG2TS_PACKET_PAYLOAD_SIZE;
         
         if (first_packet)  {
-            WritePacketHeader(first_packet, payload_size, with_pcr, ((with_dts?dts:pts)-m_PcrOffset)*300, output);
+            WritePacketHeader(first_packet, payload_size, with_pcr, ((with_dts?dts:pts)-m_PcrOffset)*300, output, with_rai);
             first_packet = false;
             output.Write(pes_header.GetData(), pes_header_size);
             output.Write(data, payload_size-pes_header_size);
             data += payload_size-pes_header_size;
         } else {
-            WritePacketHeader(first_packet, payload_size, false, 0, output);
+            WritePacketHeader(first_packet, payload_size, false, 0, output, false);
             output.Write(data, payload_size);
             data += payload_size;
         }
@@ -452,13 +454,13 @@ AP4_Mpeg2TsAudioSampleStream::WriteSample(AP4_Sample&            sample,
         MakeAdtsHeader(buffer, sample_data.GetDataSize(), sampling_frequency_index, channel_configuration);
         AP4_CopyMemory(buffer+7, sample_data.GetData(), sample_data.GetDataSize());
         AP4_UI64 ts = AP4_ConvertTime(sample.GetDts(), m_TimeScale, 90000);
-        WritePES(buffer, 7+sample.GetSize(), ts, false, ts, with_pcr, output);
+        WritePES(buffer, 7+sample.GetSize(), ts, false, ts, with_pcr, output, false);
         delete[] buffer;
     } else if (sample_description->GetFormat() == AP4_SAMPLE_FORMAT_AC_3 ||
                sample_description->GetFormat() == AP4_SAMPLE_FORMAT_EC_3 ||
                sample_description->GetFormat() == AP4_SAMPLE_FORMAT_AC_4) {
         AP4_UI64 ts = AP4_ConvertTime(sample.GetDts(), m_TimeScale, 90000);
-        WritePES(sample_data.GetData(), sample_data.GetDataSize(), ts, false, ts, with_pcr, output);
+        WritePES(sample_data.GetData(), sample_data.GetDataSize(), ts, false, ts, with_pcr, output, false);
     } else {
         return AP4_ERROR_NOT_SUPPORTED;
     }
@@ -736,7 +738,7 @@ AP4_Mpeg2TsVideoSampleStream::WriteSample(AP4_Sample&            sample,
     ++m_SamplesWritten;
     
     // write the packet
-    return WritePES(pes_data.GetData(), pes_data.GetDataSize(), dts, true, pts, with_pcr, output);
+    return WritePES(pes_data.GetData(), pes_data.GetDataSize(), dts, true, pts, with_pcr, output, sample.IsSync());
 }
 
 
@@ -744,7 +746,7 @@ AP4_Mpeg2TsVideoSampleStream::WriteSample(AP4_Sample&            sample,
 |   AP4_Mpeg2TsWriter::AP4_Mpeg2TsWriter
 +---------------------------------------------------------------------*/
 AP4_Mpeg2TsWriter::AP4_Mpeg2TsWriter(AP4_UI16 pmt_pid) :
-    m_Audio(NULL),
+	m_NumAudio(0),
     m_Video(NULL)
 {
     m_PAT = new Stream(0);
@@ -758,7 +760,10 @@ AP4_Mpeg2TsWriter::~AP4_Mpeg2TsWriter()
 {
     delete m_PAT;
     delete m_PMT;
-    delete m_Audio;
+    while (m_NumAudio) {
+    	m_NumAudio--;
+    	delete m_Audio[m_NumAudio];
+    }
     delete m_Video;
 }
 
@@ -769,7 +774,7 @@ AP4_Result
 AP4_Mpeg2TsWriter::WritePAT(AP4_ByteStream& output)
 {
     unsigned int payload_size = AP4_MPEG2TS_PACKET_PAYLOAD_SIZE;
-    m_PAT->WritePacketHeader(true, payload_size, false, 0, output);
+    m_PAT->WritePacketHeader(true, payload_size, false, 0, output, false);
     
     AP4_BitWriter writer(1024);
     
@@ -804,20 +809,22 @@ AP4_Result
 AP4_Mpeg2TsWriter::WritePMT(AP4_ByteStream& output)
 {
     // check that we have at least one media stream
-    if (m_Audio == NULL && m_Video == NULL) {
+    if (m_NumAudio == 0 && m_Video == NULL) {
         return AP4_ERROR_INVALID_STATE;
     }
     
     unsigned int payload_size = AP4_MPEG2TS_PACKET_PAYLOAD_SIZE;
-    m_PMT->WritePacketHeader(true, payload_size, false, 0, output);
+    m_PMT->WritePacketHeader(true, payload_size, false, 0, output, false);
     
     AP4_BitWriter writer(1024);
     
     unsigned int section_length = 13;
     unsigned int pcr_pid = 0;
-    if (m_Audio) {
-        section_length += 5+m_Audio->m_Descriptor.GetDataSize();
-        pcr_pid = m_Audio->GetPID();
+    if (m_NumAudio) {
+    	for (int i=0; i<m_NumAudio; i++) {
+    		section_length += 5+m_Audio[i]->m_Descriptor.GetDataSize();
+    		pcr_pid = m_Audio[i]->GetPID();
+    	}
     } 
     if (m_Video) {
         section_length += 5+m_Video->m_Descriptor.GetDataSize();;
@@ -841,17 +848,6 @@ AP4_Mpeg2TsWriter::WritePMT(AP4_ByteStream& output)
     writer.Write(0xF, 4);      // reserved
     writer.Write(0, 12);       // program_info_length
     
-    if (m_Audio) {
-        writer.Write(m_Audio->m_StreamType, 8);                // stream_type
-        writer.Write(0x7, 3);                                  // reserved
-        writer.Write(m_Audio->GetPID(), 13);                   // elementary_PID
-        writer.Write(0xF, 4);                                  // reserved
-        writer.Write(m_Audio->m_Descriptor.GetDataSize(), 12); // ES_info_length
-        for (unsigned int i=0; i<m_Audio->m_Descriptor.GetDataSize(); i++) {
-            writer.Write(m_Audio->m_Descriptor.GetData()[i], 8);
-        }
-    }
-    
     if (m_Video) {
         writer.Write(m_Video->m_StreamType, 8);                // stream_type
         writer.Write(0x7, 3);                                  // reserved
@@ -862,7 +858,20 @@ AP4_Mpeg2TsWriter::WritePMT(AP4_ByteStream& output)
             writer.Write(m_Video->m_Descriptor.GetData()[i], 8);
         }
     }
-    
+
+    if (m_NumAudio) {
+    	for (int k=0; k<m_NumAudio; k++) {
+    		writer.Write(m_Audio[k]->m_StreamType, 8);                // stream_type
+    		writer.Write(0x7, 3);                                  // reserved
+    		writer.Write(m_Audio[k]->GetPID(), 13);                   // elementary_PID
+    		writer.Write(0xF, 4);                                  // reserved
+    		writer.Write(m_Audio[k]->m_Descriptor.GetDataSize(), 12); // ES_info_length
+    		for (unsigned int i=0; i<m_Audio[k]->m_Descriptor.GetDataSize(); i++) {
+    			writer.Write(m_Audio[k]->m_Descriptor.GetData()[i], 8);
+    		}
+    	}
+    }
+        
     writer.Write(ComputeCRC(writer.GetData()+1, section_length-1), 32); // CRC
     
     output.Write(writer.GetData(), section_length+4);
@@ -891,12 +900,13 @@ AP4_Mpeg2TsWriter::SetAudioStream(AP4_UI32        timescale,
                                                              timescale,
                                                              stream_type,
                                                              stream_id,
-                                                             m_Audio,
+                                                             m_Audio[m_NumAudio],
                                                              descriptor,
                                                              descriptor_length,
                                                              pcr_offset);
     if (AP4_FAILED(result)) return result;
-    stream = m_Audio;
+    stream = m_Audio[m_NumAudio];
+    m_NumAudio++;
     return AP4_SUCCESS;
 }
 

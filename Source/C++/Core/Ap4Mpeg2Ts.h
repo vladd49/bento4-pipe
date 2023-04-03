@@ -85,7 +85,8 @@ public:
                                unsigned int&   payload_size,
                                bool            with_pcr,
                                AP4_UI64        pcr,
-                               AP4_ByteStream& output);
+                               AP4_ByteStream& output,
+                               	bool			 with_rai = false);
         
     private:
         AP4_UI16     m_PID;
@@ -117,7 +118,8 @@ public:
                                     bool                 with_dts, 
                                     AP4_UI64             pts, 
                                     bool                 with_pcr, 
-                                    AP4_ByteStream&      output);
+                                    AP4_ByteStream&      output,
+                                    bool				   with_rai = false);
 
         virtual AP4_Result WriteSample(AP4_Sample&            sample,
                                        AP4_DataBuffer&        sample_data,
@@ -172,7 +174,8 @@ public:
 private:
     Stream*       m_PAT;
     Stream*       m_PMT;
-    SampleStream* m_Audio;
+    AP4_UI08      m_NumAudio;
+    SampleStream* m_Audio[10];
     SampleStream* m_Video;
 };
 

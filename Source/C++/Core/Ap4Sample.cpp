@@ -147,9 +147,9 @@ AP4_Sample::ReadData(AP4_DataBuffer& data, AP4_Size size, AP4_Size offset)
     AP4_LargeSize stream_size = 0;
     AP4_Result result = m_DataStream->GetSize(stream_size);
     if (AP4_SUCCEEDED(result)) {
-        if (size + offset > stream_size) {
+        /*if (size + offset > stream_size) {
             return AP4_ERROR_OUT_OF_RANGE;
-        }
+        }*/
     }
     
     // set the buffer size

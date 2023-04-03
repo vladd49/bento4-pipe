@@ -52,6 +52,7 @@ struct _Options {
     const char*  playlist;
     unsigned int playlist_hls_version;
     const char*  input;
+    const char*  ainput[10];
     const char*  output;
     unsigned int segment_duration;
     unsigned int segment_duration_threshold;
@@ -199,25 +200,27 @@ ReadSample(SampleReader&   reader,
 +---------------------------------------------------------------------*/
 static AP4_Result
 WriteSamples(AP4_Mpeg2TsWriter&               writer,
-             AP4_Track*                       audio_track,
-             SampleReader*                    audio_reader, 
-             AP4_Mpeg2TsWriter::SampleStream* audio_stream,
+             AP4_Track*                       audio_track[10],
+             SampleReader*                    audio_reader[10], 
+             AP4_Mpeg2TsWriter::SampleStream* audio_stream[10],
+             int                              num_audio,
              AP4_Track*                       video_track,
              SampleReader*                    video_reader, 
              AP4_Mpeg2TsWriter::SampleStream* video_stream,
              unsigned int                     segment_duration_threshold)
 {
-    AP4_Sample        audio_sample;
-    AP4_DataBuffer    audio_sample_data;
-    unsigned int      audio_sample_count = 0;
-    double            audio_ts = 0.0;
-    bool              audio_eos = false;
+    AP4_Sample        audio_sample[10];
+    AP4_DataBuffer    audio_sample_data[10];
+    unsigned int      audio_sample_count[10];
+    double            audio_ts[10];
+    bool              audio_eos[10];
     AP4_Sample        video_sample;
     AP4_DataBuffer    video_sample_data;
     unsigned int      video_sample_count = 0;
     double            video_ts = 0.0;
     bool              video_eos = false;
     double            last_ts = 0.0;
+    double			   patpmt_ts = 0.0;
     unsigned int      segment_number = 0;
     double            segment_duration = 0.0;
     AP4_ByteStream*   output = NULL;
@@ -227,9 +230,15 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
     AP4_Array<double> segment_durations;
     
     // prime the samples
-    if (audio_reader) {
-        result = ReadSample(*audio_reader, *audio_track, audio_sample, audio_sample_data, audio_ts, audio_eos);
-        if (AP4_FAILED(result)) goto end;
+    if (num_audio) {
+    	for (int i=0; i<num_audio; i++) {
+    		audio_sample_count[i] = 0;
+    		audio_ts[i] = 0.0;
+    		audio_eos[i] = 0.0;
+    		
+    		result = ReadSample(*audio_reader[i], *audio_track[i], audio_sample[i], audio_sample_data[i], audio_ts[i], audio_eos[i]);
+    		if (AP4_FAILED(result)) goto end;
+    	}
     }
     if (video_reader) {
         result = ReadSample(*video_reader, *video_track, video_sample, video_sample_data, video_ts, video_eos);
@@ -239,15 +248,24 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
     for (;;) {
         bool sync_sample = false;
         AP4_Track* chosen_track= NULL;
-        if (audio_track && !audio_eos) {
-            chosen_track = audio_track;
+        int chosen_audio_num = 0;
+        if (num_audio && !audio_eos[0]) {
+            chosen_track = audio_track[0];
             if (video_track == NULL) sync_sample = true;
         }
         if (video_track && !video_eos) {
-            if (audio_track) {
-                if (video_ts <= audio_ts) {
-                    chosen_track = video_track;
-                }
+            if (num_audio) {
+            	int all = 1;
+            	for (int i=0; i<num_audio; i++) {
+            		if (video_ts > audio_ts[i]) {
+            			all = 0;
+            			chosen_track = audio_track[i];
+            			chosen_audio_num = i;
+            		}
+            	}
+            	if (all) {
+            		chosen_track = video_track;
+            	}
             } else {
                 chosen_track = video_track;
             }
@@ -258,7 +276,7 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
         if (chosen_track == NULL) break;
         
         // check if we need to start a new segment
-        if (Options.segment_duration && sync_sample) {
+        /*if (Options.segment_duration && sync_sample) {
             if (video_track) {
                 segment_duration = video_ts - last_ts;
             } else {
@@ -273,7 +291,7 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
                 if (output) {
                     segment_durations.Append(segment_duration);
                     if (Options.verbose) {
-                        printf("Segment %d, duration=%.2f, %d audio samples, %d video samples\n",
+                        fprintf(stderr, "Segment %d, duration=%.2f, %d audio samples, %d video samples\n",
                                segment_number, 
                                segment_duration,
                                audio_sample_count, 
@@ -286,26 +304,33 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
                     video_sample_count = 0;
                 }
             }
-        }
+        }*/
+        
         if (output == NULL) {
             output = OpenOutput(Options.output, segment_number);
             if (output == NULL) return AP4_ERROR_CANNOT_OPEN_FILE;
             writer.WritePAT(*output);
             writer.WritePMT(*output);
+            patpmt_ts = video_ts;
+        } else if ((video_ts - patpmt_ts)*1000.0 > 200.0) {
+            writer.WritePAT(*output);
+            writer.WritePMT(*output);
+            patpmt_ts = video_ts;
         }
+        //fprintf(stderr, "ts: %.10f\n", video_ts);
         
         // write the samples out and advance to the next sample
-        if (chosen_track == audio_track) {
-            result = audio_stream->WriteSample(audio_sample, 
-                                               audio_sample_data,
-                                               audio_track->GetSampleDescription(audio_sample.GetDescriptionIndex()), 
+        if (chosen_track != video_track) {
+            result = audio_stream[chosen_audio_num]->WriteSample(audio_sample[chosen_audio_num], 
+                                               audio_sample_data[chosen_audio_num],
+                                               audio_track[chosen_audio_num]->GetSampleDescription(audio_sample[chosen_audio_num].GetDescriptionIndex()), 
                                                video_track==NULL, 
                                                *output);
             if (AP4_FAILED(result)) return result;
             
-            result = ReadSample(*audio_reader, *audio_track, audio_sample, audio_sample_data, audio_ts, audio_eos);
+            result = ReadSample(*audio_reader[chosen_audio_num], *audio_track[chosen_audio_num], audio_sample[chosen_audio_num], audio_sample_data[chosen_audio_num], audio_ts[chosen_audio_num], audio_eos[chosen_audio_num]);
             if (AP4_FAILED(result)) return result;
-            ++audio_sample_count;
+            ++audio_sample_count[chosen_audio_num];
         } else if (chosen_track == video_track) {
             result = video_stream->WriteSample(video_sample,
                                                video_sample_data, 
@@ -327,20 +352,20 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
         if (video_track) {
             segment_duration = video_ts - last_ts;
         } else {
-            segment_duration = audio_ts - last_ts;
+            segment_duration = audio_ts[0] - last_ts;
         }
         segment_durations.Append(segment_duration);
         if (Options.verbose) {
-            printf("Segment %d, duration=%.2f, %d audio samples, %d video samples\n",
+            fprintf(stderr, "Segment %d, duration=%.2f, %d audio samples, %d video samples\n",
                    segment_number, 
                    segment_duration,
-                   audio_sample_count, 
+                   audio_sample_count[0], 
                    video_sample_count);
         }
         output->Release();
         output = NULL;
         ++segment_number;
-        audio_sample_count = 0;
+        audio_sample_count[0] = 0;
         video_sample_count = 0;
     }
 
@@ -386,9 +411,9 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
         if (video_track) {
             segment_duration = video_ts - last_ts;
         } else {
-            segment_duration = audio_ts - last_ts;
+            segment_duration = audio_ts[0] - last_ts;
         }
-        printf("Conversion complete, duration=%.2f secs\n",
+        fprintf(stderr, "Conversion complete, duration=%.2f secs\n",
                segment_duration);
     }
     
@@ -411,15 +436,17 @@ main(int argc, char** argv)
     // default options
     Options.segment_duration           = 0;
     Options.pmt_pid                    = 0x100;
-    Options.audio_pid                  = 0x101;
-    Options.video_pid                  = 0x102;
+    Options.audio_pid                  = 0x102;
+    Options.video_pid                  = 0x101;
     Options.verbose                    = false;
     Options.playlist                   = NULL;
     Options.playlist_hls_version       = 3;
     Options.input                      = NULL;
-    Options.output                     = NULL;
+    Options.ainput[0]                  = NULL;
+    Options.output                     = "-stdout";
     Options.segment_duration_threshold = DefaultSegmentDurationThreshold;
     Options.pcr_offset                 = AP4_MPEG2_TS_DEFAULT_PCR_OFFSET;
+    int num_audio = 0;
     
     // parse command line
     AP4_Result result;
@@ -479,19 +506,43 @@ main(int argc, char** argv)
                 fprintf(stderr, "ERROR: --playlist-hls-version requires number > 0\n");
                 return 1;
             }
-        } else if (Options.input == NULL) {
-            Options.input = arg;
+        } else if (!strcmp(arg, "--audio")) {
+            if (*args == NULL) {
+                fprintf(stderr, "ERROR: --audio requires a filename\n");
+                return 1;
+            }
+            Options.ainput[num_audio] = *args++;
+            num_audio++;
+        } else if (!strcmp(arg, "--video")) {
+            if (*args == NULL) {
+                fprintf(stderr, "ERROR: --video requires a filename\n");
+                return 1;
+            }
+            Options.input = *args++;
+        } else if (!strcmp(arg, "-i")) {
+        	if (Options.input == NULL) {
+        		Options.input = *args++;
+        	} else {
+        		Options.ainput[num_audio] = *args++;
+        		num_audio++;
+        	}
+        //} else if (Options.input == NULL) {
+            //Options.input = arg;
         } else if (Options.output == NULL) {
             Options.output = arg;
         } else {
             fprintf(stderr, "ERROR: unexpected argument\n");
-            return 1;
+            //return 1;
         }
     }
 
     // check args
     if (Options.input == NULL) {
         fprintf(stderr, "ERROR: missing input file name\n");
+        return 1;
+    }
+    if (Options.ainput[0] == NULL) {
+        fprintf(stderr, "ERROR: missing audio input file name\n");
         return 1;
     }
     if (Options.output == NULL) {
@@ -507,6 +558,16 @@ main(int argc, char** argv)
         return 1;
     }
     
+    AP4_ByteStream* ainput[10];
+    
+    for (int i=0; i<num_audio; i++) {
+    	result = AP4_FileByteStream::Create(Options.ainput[i], AP4_FileByteStream::STREAM_MODE_READ, ainput[i]);
+    	if (AP4_FAILED(result)) {
+    		fprintf(stderr, "ERROR: cannot open audio input (%d)\n", result);
+    		return 1;
+    	}
+    }
+    
 	// open the file
     AP4_File* input_file = new AP4_File(*input, true);
 
@@ -518,36 +579,64 @@ main(int argc, char** argv)
         return 1;
     }
 
-    // get the audio and video tracks
-    AP4_Track* audio_track = movie->GetTrack(AP4_Track::TYPE_AUDIO);
+	// open the audio file
+	AP4_File* ainput_file[10];
+	AP4_SampleDescription* asample_description[10];
+	AP4_Movie* amovie[10];
+	AP4_Track* audio_track[10];
+	
+	for (int i=0; i<num_audio; i++) {
+		ainput_file[i] = new AP4_File(*ainput[i], true);
+		
+		// get the movie
+		amovie[i] = ainput_file[i]->GetMovie();
+		if (amovie[i] == NULL) {
+			fprintf(stderr, "ERROR: no movie in %d audio file\n", i);
+			return 1;
+		}
+		
+		// get the audio and video tracks
+		audio_track[i] = amovie[i]->GetTrack(AP4_Track::TYPE_AUDIO);
+	}
+		
     AP4_Track* video_track = movie->GetTrack(AP4_Track::TYPE_VIDEO);
-    if (audio_track == NULL && video_track == NULL) {
+    if (video_track == NULL) {
         fprintf(stderr, "ERROR: no suitable tracks found\n");
         delete input_file;
+        //delete ainput_file;
         input->Release();
+        //ainput->Release();
         return 1;
     }
 
     // create the appropriate readers
     AP4_LinearReader* linear_reader = NULL;
-    SampleReader*     audio_reader  = NULL;
+    AP4_LinearReader* alinear_reader[10];
+    SampleReader*     audio_reader[10];
     SampleReader*     video_reader  = NULL;
+    
     if (movie->HasFragments()) {
         // create a linear reader to get the samples
         linear_reader = new AP4_LinearReader(*movie, input);
-    
-        if (audio_track) {
-            linear_reader->EnableTrack(audio_track->GetId());
-            audio_reader = new FragmentedSampleReader(*linear_reader, audio_track->GetId());
+        
+        for (int i=0; i<num_audio; i++) {
+        	alinear_reader[i] = new AP4_LinearReader(*amovie[i], ainput[i]);
+        	
+        	if (audio_track[i]) {
+        		alinear_reader[i]->EnableTrack(audio_track[i]->GetId());
+        		audio_reader[i] = new FragmentedSampleReader(*alinear_reader[i], audio_track[i]->GetId());
+        	}
         }
         if (video_track) {
             linear_reader->EnableTrack(video_track->GetId());
             video_reader = new FragmentedSampleReader(*linear_reader, video_track->GetId());
         }
     } else {
-        if (audio_track) {
-            audio_reader = new TrackSampleReader(*audio_track);
-        }
+    	for (int i=0; i<num_audio; i++) {
+    		if (audio_track[i]) {
+    			audio_reader[i] = new TrackSampleReader(*audio_track[i]);
+    		}
+    	}
         if (video_track) {
             video_reader = new TrackSampleReader(*video_track);
         }
@@ -555,44 +644,62 @@ main(int argc, char** argv)
     
     // create an MPEG2 TS Writer
     AP4_Mpeg2TsWriter writer(Options.pmt_pid);
-    AP4_Mpeg2TsWriter::SampleStream* audio_stream = NULL;
+    AP4_Mpeg2TsWriter::SampleStream* audio_stream[10];
     AP4_Mpeg2TsWriter::SampleStream* video_stream = NULL;
     
     // add the audio stream
-    if (audio_track) {
-        sample_description = audio_track->GetSampleDescription(0);
-        if (sample_description == NULL) {
-            fprintf(stderr, "ERROR: unable to parse audio sample description\n");
-            goto end;
-        }
-
-        unsigned int stream_type = 0;
-        unsigned int stream_id   = 0;
-        if (sample_description->GetFormat() == AP4_SAMPLE_FORMAT_MP4A) {
-            stream_type = AP4_MPEG2_STREAM_TYPE_ISO_IEC_13818_7;
-            stream_id   = AP4_MPEG2_TS_DEFAULT_STREAM_ID_AUDIO;
-        } else if (sample_description->GetFormat() == AP4_SAMPLE_FORMAT_AC_3) {
-            stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_AC3;
-            stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
-        } else if ( sample_description->GetFormat() == AP4_SAMPLE_FORMAT_EC_3) {
-            stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_EAC3;
-            stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
-        } else {
-            fprintf(stderr, "ERROR: audio codec not supported\n");
-            return 1;
-        }
-
-        result = writer.SetAudioStream(audio_track->GetMediaTimeScale(),
-                                       stream_type,
-                                       stream_id,
-                                       audio_stream,
-                                       Options.audio_pid,
-                                       NULL, 0,
-                                       Options.pcr_offset);
-        if (AP4_FAILED(result)) {
-            fprintf(stderr, "could not create audio stream (%d)\n", result);
-            goto end;
-        }
+    if (num_audio) {
+    	for (int i=0; i<num_audio; i++) {
+    		asample_description[i] = audio_track[i]->GetSampleDescription(0);
+    		if (asample_description[i] == NULL) {
+    			fprintf(stderr, "ERROR: unable to parse audio sample description\n");
+    			goto end;
+    		}
+    		
+    		fprintf(stderr, "Language: %s\n", audio_track[i]->GetTrackLanguage());
+    		const char *lang = audio_track[i]->GetTrackLanguage();
+    		
+    		AP4_BitWriter LangDesc(6);
+    		if (lang) {
+    			LangDesc.Write(0x0a, 8);
+    			LangDesc.Write(4, 8);
+    			LangDesc.Write(lang[0], 8);
+    			LangDesc.Write(lang[1], 8);
+    			LangDesc.Write(lang[2], 8);
+    			LangDesc.Write(0, 8);
+    		}
+    		
+    		unsigned int stream_type = 0;
+    		unsigned int stream_id   = 0;
+    		if (asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_MP4A) {
+    			stream_type = AP4_MPEG2_STREAM_TYPE_ISO_IEC_13818_7;
+    			stream_id   = AP4_MPEG2_TS_DEFAULT_STREAM_ID_AUDIO;
+    		} else if (asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_AC_3) {
+    			stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_AC3;
+    			stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
+    		} else if ( asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_EC_3) {
+    			stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_EAC3;
+    			stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
+    		} else {
+    			fprintf(stderr, "ERROR: audio codec %s (%c%c%c%c) not supported\n", 
+    				AP4_GetFormatName(asample_description[i]->GetFormat()), (asample_description[i]->GetFormat() >> 24) & 0xFF,
+    				(asample_description[i]->GetFormat() >> 16) & 0xFF, (asample_description[i]->GetFormat() >> 8) & 0xFF,
+    				(asample_description[i]->GetFormat()) & 0xFF);
+    			return 1;
+    		}
+    		
+    		result = writer.SetAudioStream(audio_track[i]->GetMediaTimeScale(),
+    			stream_type,
+    			stream_id,
+    			audio_stream[i],
+    			Options.audio_pid+i,
+    			lang ? LangDesc.GetData() : NULL, lang ? 6 : 0,
+    			Options.pcr_offset);
+    		if (AP4_FAILED(result)) {
+    			fprintf(stderr, "could not create audio stream (%d)\n", result);
+    			goto end;
+    		}
+    	}
     }
     
     // add the video stream
@@ -619,7 +726,10 @@ main(int argc, char** argv)
                    sample_description->GetFormat() == AP4_SAMPLE_FORMAT_DVH1) {
             stream_type = AP4_MPEG2_STREAM_TYPE_HEVC;
         } else {
-            fprintf(stderr, "ERROR: video codec not supported\n");
+            fprintf(stderr, "ERROR: video codec %s (%c%c%c%c) not supported\n", 
+            	    AP4_GetFormatName(sample_description->GetFormat()), (sample_description->GetFormat() >> 24) & 0xFF,
+    				(sample_description->GetFormat() >> 16) & 0xFF, (sample_description->GetFormat() >> 8) & 0xFF,
+    				(sample_description->GetFormat()) & 0xFF);
             return 1;
         }
         result = writer.SetVideoStream(video_track->GetMediaTimeScale(),
@@ -636,7 +746,7 @@ main(int argc, char** argv)
     }
     
     result = WriteSamples(writer,
-                          audio_track, audio_reader, audio_stream,
+                          audio_track, audio_reader, audio_stream, num_audio,
                           video_track, video_reader, video_stream,
                           Options.segment_duration_threshold);
     if (AP4_FAILED(result)) {
@@ -645,9 +755,15 @@ main(int argc, char** argv)
 
 end:
     delete input_file;
+    for (int i=0; i<num_audio; i++) {
+    	delete ainput_file[i];
+    }
     input->Release();
     delete linear_reader;
-    delete audio_reader;
+    for (int i=0; i<num_audio; i++) {
+    	delete alinear_reader[i];
+    	delete audio_reader[i];
+    }
     delete video_reader;
     
     return result == AP4_SUCCESS?0:1;

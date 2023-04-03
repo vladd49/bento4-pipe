@@ -35,6 +35,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <malloc.h>
+
 #if !defined(_WIN32_WCE)
 #include <errno.h>
 #include <sys/stat.h>
@@ -203,6 +205,11 @@ private:
     FILE*           m_File;
     AP4_Position    m_Position;
     AP4_LargeSize   m_Size;
+    
+    AP4_Position	m_ReadPos;
+    unsigned char	*m_Buffer;
+    AP4_Size		m_BufSize;
+    AP4_Position	m_BufPos;
 };
 
 /*----------------------------------------------------------------------
@@ -290,8 +297,12 @@ AP4_StdcFileByteStream::AP4_StdcFileByteStream(AP4_FileByteStream* delegator,
     m_ReferenceCount(1),
     m_File(file),
     m_Position(0),
-    m_Size(size)
+    m_Size(size),
+    m_ReadPos(0)
 {
+	m_BufSize = 4*1024*1024;
+	m_Buffer = (unsigned char *)malloc(m_BufSize);
+	m_BufPos = 0;
 }
 
 /*----------------------------------------------------------------------
@@ -302,6 +313,7 @@ AP4_StdcFileByteStream::~AP4_StdcFileByteStream()
     if (m_File && m_File != stdin && m_File != stdout && m_File != stderr) {
         fclose(m_File);
     }
+    free(m_Buffer);
 }
 
 /*----------------------------------------------------------------------
@@ -337,12 +349,53 @@ AP4_StdcFileByteStream::ReadPartial(void*     buffer,
                                     AP4_Size& bytesRead)
 {
     size_t nbRead;
+    size_t nbCopied = 0;
 
-    nbRead = fread(buffer, 1, bytesToRead, m_File);
+    //fprintf(stderr, "Read: bytesToRead: %d, m_Position: %d, m_ReadPos: %d, m_BufPos: %d\n",
+    //	bytesToRead, m_Position, m_ReadPos, m_BufPos);
+    
+    if (m_Position < m_ReadPos) {
+    	AP4_Size toRead = m_ReadPos - m_Position;
+    	
+    	if (toRead < bytesToRead) {
+    		toRead = bytesToRead;
+    	}
+    	
+    	if (toRead > m_BufPos) {
+    		memcpy(buffer, m_Buffer + (m_BufSize - (toRead - m_BufPos)), toRead - m_BufPos);
+    		memcpy((char *)buffer + (toRead - m_BufPos), m_Buffer, m_BufPos);
+    	} else {
+    		memcpy(buffer, m_Buffer + m_BufPos - toRead, toRead);
+    	}
+    	
+    	m_Position += toRead;
+    	bytesToRead -= toRead;
+    	nbCopied = toRead;
+    }
+    
+    if (bytesToRead > 0) {
+    	nbRead = fread((char *)buffer + nbCopied, 1, bytesToRead, m_File);
+    }
+    
+    //fprintf(stderr, "Read bytes: %d\n", bytesToRead);
 
-    if (nbRead > 0) {
-        bytesRead = (AP4_Size)nbRead;
-        m_Position += nbRead;
+    if ((nbRead + nbCopied) > 0) {
+        bytesRead = (AP4_Size)nbRead + (AP4_Size)nbCopied;
+        
+        if (nbRead > 0) {
+        	if (m_BufPos + nbRead > m_BufSize) {
+        		memcpy(m_Buffer + m_BufPos, buffer, m_BufSize - m_BufPos);
+        		memcpy(m_Buffer, buffer, nbRead - (m_BufSize - m_BufPos));
+        		m_BufPos = nbRead - (m_BufSize - m_BufPos);
+        	} else {
+        		memcpy(m_Buffer + m_BufPos, buffer, nbRead);
+        		m_BufPos += nbRead;
+        	}
+        	
+        	m_Position += nbRead;
+        	m_ReadPos += nbRead;
+        }
+        	
         return AP4_SUCCESS;
     } else if (feof(m_File)) {
         bytesRead = 0;
@@ -365,6 +418,7 @@ AP4_StdcFileByteStream::WritePartial(const void* buffer,
 
     if (bytesToWrite == 0) return AP4_SUCCESS;
     nbWritten = fwrite(buffer, 1, bytesToWrite, m_File);
+    //fprintf(stderr, "Write bytes: %d\n", bytesToWrite);
     
     if (nbWritten > 0) {
         bytesWritten = (AP4_Size)nbWritten;
@@ -386,16 +440,52 @@ AP4_Result
 AP4_StdcFileByteStream::Seek(AP4_Position position)
 {
     // shortcut
+    //fprintf(stderr, "Seek: position: %d, m_Position: %d, m_ReadPos: %d, m_BufPos: %d\n",
+    //	position, m_Position, m_ReadPos, m_BufPos);
+
     if (position == m_Position) return AP4_SUCCESS;
     
-    size_t result;
+    if (position < m_Position) {
+    	m_Position = position;
+    	return AP4_SUCCESS;
+    }
+    
+    if (position > m_Position) {
+    	if (position > m_ReadPos) {
+    		AP4_Size  bytesToRead = position - m_ReadPos;
+    		size_t nbRead;
+    		
+    		if (bytesToRead < (m_BufSize - m_BufPos)) {
+    			nbRead = fread(m_Buffer + m_BufPos, 1, bytesToRead, m_File);
+    			m_BufPos += nbRead;
+    			m_ReadPos += nbRead;
+    		} else {
+    			nbRead = fread(m_Buffer + m_BufPos, 1, m_BufSize - m_BufPos, m_File);
+    			nbRead += fread(m_Buffer, 1, bytesToRead - (m_BufSize - m_BufPos), m_File);
+    			m_BufPos = bytesToRead - (m_BufSize - m_BufPos);
+    			m_ReadPos += nbRead;
+    		}
+    		
+    		if (nbRead != bytesToRead) {
+    			return AP4_FAILURE;
+    		} else {
+    			m_Position = position;
+    			return AP4_SUCCESS;
+    		}
+    	} else {
+    		m_Position = position;
+    		return AP4_SUCCESS;
+    	}
+    }
+    
+    /*size_t result;
     result = AP4_fseek(m_File, position, SEEK_SET);
     if (result == 0) {
         m_Position = position;
         return AP4_SUCCESS;
     } else {
         return AP4_FAILURE;
-    }
+    }*/
 }
 
 /*----------------------------------------------------------------------
