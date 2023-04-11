@@ -31,6 +31,8 @@
 +---------------------------------------------------------------------*/
 #include <stdio.h>
 #include <stdlib.h>
+#include <iostream>
+#include "Ap4DynamicCast.h"
 
 #include "Ap4.h"
 
@@ -88,6 +90,51 @@ PrintUsageAndExit()
             "  --playlist-hls-version <n> (default=3)\n"
             ,'%');
     exit(1);
+}
+
+AP4_Result ParseAvcData(const AP4_UI08* data, AP4_Size data_size)
+{
+    auto m_AvcParser = new AP4_AvcFrameParser();
+    
+    AP4_AvcFrameParser::AccessUnitInfo access_unit_info;
+    AP4_Result result = m_AvcParser->Feed(data, data_size, access_unit_info);
+    if (AP4_FAILED(result)) return result;
+    
+    // cleanup
+    access_unit_info.Reset();
+
+    delete m_AvcParser;
+    return AP4_SUCCESS;
+}
+
+static AP4_AvccAtom* get_avcc(AP4_TrakAtom* track ) {
+    if (!track) return nullptr;
+    
+    // get the sample description atom
+    AP4_StsdAtom* stsd = AP4_DYNAMIC_CAST(AP4_StsdAtom, track->FindChild("mdia/minf/stbl/stsd"));
+    if (!stsd) return nullptr;
+
+    AP4_AvccAtom* avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc1/avcC"));
+    if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc2/avcC"));
+    if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc3/avcC"));
+    if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc4/avcC"));
+    if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("encv/avcC"));
+
+    if (!avcc)    return nullptr;
+
+    // parse the sps and pps if we have them
+    AP4_Array<AP4_DataBuffer>& sps_list = avcc->GetSequenceParameters();
+    for (unsigned int i=0; i<sps_list.ItemCount(); i++) {
+        AP4_DataBuffer& sps = sps_list[i];
+        ParseAvcData(sps.GetData(), sps.GetDataSize());
+    }
+    AP4_Array<AP4_DataBuffer>& pps_list = avcc->GetPictureParameters();
+    for (unsigned int i=0; i<pps_list.ItemCount(); i++) {
+        AP4_DataBuffer& pps = pps_list[i];
+        ParseAvcData(pps.GetData(), pps.GetDataSize());
+    }
+
+    return avcc;
 }
 
 /*----------------------------------------------------------------------
@@ -240,6 +287,8 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
     		if (AP4_FAILED(result)) goto end;
     	}
     }
+
+
     if (video_reader) {
         result = ReadSample(*video_reader, *video_track, video_sample, video_sample_data, video_ts, video_eos);
         if (AP4_FAILED(result)) goto end;
@@ -274,37 +323,7 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
             }
         }
         if (chosen_track == NULL) break;
-        
-        // check if we need to start a new segment
-        /*if (Options.segment_duration && sync_sample) {
-            if (video_track) {
-                segment_duration = video_ts - last_ts;
-            } else {
-                segment_duration = audio_ts - last_ts;
-            }
-            if (segment_duration >= (double)Options.segment_duration - (double)segment_duration_threshold/1000.0) {
-                if (video_track) {
-                    last_ts = video_ts;
-                } else {
-                    last_ts = audio_ts;
-                }
-                if (output) {
-                    segment_durations.Append(segment_duration);
-                    if (Options.verbose) {
-                        fprintf(stderr, "Segment %d, duration=%.2f, %d audio samples, %d video samples\n",
-                               segment_number, 
-                               segment_duration,
-                               audio_sample_count, 
-                               video_sample_count);
-                    }
-                    output->Release();
-                    output = NULL;
-                    ++segment_number;
-                    audio_sample_count = 0;
-                    video_sample_count = 0;
-                }
-            }
-        }*/
+
         
         if (output == NULL) {
             output = OpenOutput(Options.output, segment_number);
@@ -319,33 +338,50 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
         }
         //fprintf(stderr, "ts: %.10f\n", video_ts);
         
-        // write the samples out and advance to the next sample
+
+        auto sdesr_index = audio_sample[chosen_audio_num].GetDescriptionIndex();
+        auto dscr =  audio_track[chosen_audio_num]->GetSampleDescription(sdesr_index);
+        if (dscr == nullptr) {
+            continue;
+        }
+
         if (chosen_track != video_track) {
             result = audio_stream[chosen_audio_num]->WriteSample(audio_sample[chosen_audio_num], 
                                                audio_sample_data[chosen_audio_num],
                                                audio_track[chosen_audio_num]->GetSampleDescription(audio_sample[chosen_audio_num].GetDescriptionIndex()), 
+                                               nullptr,
                                                video_track==NULL, 
                                                *output);
             if (AP4_FAILED(result)) return result;
             
+
             result = ReadSample(*audio_reader[chosen_audio_num], *audio_track[chosen_audio_num], audio_sample[chosen_audio_num], audio_sample_data[chosen_audio_num], audio_ts[chosen_audio_num], audio_eos[chosen_audio_num]);
             if (AP4_FAILED(result)) return result;
             ++audio_sample_count[chosen_audio_num];
+            
         } else if (chosen_track == video_track) {
-            result = video_stream->WriteSample(video_sample,
-                                               video_sample_data, 
-                                               video_track->GetSampleDescription(video_sample.GetDescriptionIndex()),
-                                               true, 
-                                               *output);
-            if (AP4_FAILED(result)) return result;
 
+            auto avcc = get_avcc(video_track->UseTrakAtom());
+            if (avcc == nullptr) {
+                return  1;
+            }
+
+            result = video_stream->WriteSample(video_sample,
+                                                    video_sample_data, 
+                                                    video_track->GetSampleDescription(video_sample.GetDescriptionIndex()),
+                                                    avcc,
+                                                    true, 
+                                                    *output);
+            if (AP4_FAILED(result)) return result;
             result = ReadSample(*video_reader, *video_track, video_sample, video_sample_data, video_ts, video_eos);
+           
             if (AP4_FAILED(result)) return result;
             ++video_sample_count;
         } else {
             break;
         }        
     }
+
     
     // finish the last segment
     if (output) {
@@ -369,44 +405,6 @@ WriteSamples(AP4_Mpeg2TsWriter&               writer,
         video_sample_count = 0;
     }
 
-    // create the playlist file if needed 
-    if (Options.playlist) {
-        playlist = OpenOutput(Options.playlist, 0);
-        if (playlist == NULL) return AP4_ERROR_CANNOT_OPEN_FILE;
-
-        unsigned int target_duration = 0;
-        for (unsigned int i=0; i<segment_durations.ItemCount(); i++) {
-            if ((unsigned int)(segment_durations[i]+0.5) > target_duration) {
-                target_duration = (unsigned int)segment_durations[i];
-            }
-        }
-
-        playlist->WriteString("#EXTM3U\r\n");
-        if (Options.playlist_hls_version > 1) {
-            sprintf(string_buffer, "#EXT-X-VERSION:%d\r\n", Options.playlist_hls_version);
-            playlist->WriteString(string_buffer);
-        }
-        playlist->WriteString("#EXT-X-MEDIA-SEQUENCE:0\r\n");
-        playlist->WriteString("#EXT-X-TARGETDURATION:");
-        sprintf(string_buffer, "%d\r\n\r\n", target_duration);
-        playlist->WriteString(string_buffer);
-
-        for (unsigned int i=0; i<segment_durations.ItemCount(); i++) {
-            if (Options.playlist_hls_version >= 3) {
-                sprintf(string_buffer, "#EXTINF:%f,\r\n", segment_durations[i]);
-            } else {
-                sprintf(string_buffer, "#EXTINF:%u,\r\n", (unsigned int)(segment_durations[i]+0.5));
-            }
-            playlist->WriteString(string_buffer);
-            sprintf(string_buffer, Options.output, i);
-            playlist->WriteString(string_buffer);
-            playlist->WriteString("\r\n");
-        }
-                        
-        playlist->WriteString("\r\n#EXT-X-ENDLIST\r\n");
-        playlist->Release();
-    }    
-
     if (Options.verbose) {
         if (video_track) {
             segment_duration = video_ts - last_ts;
@@ -422,6 +420,30 @@ end:
     
     return result;
 }
+
+
+static void ProtectedSampleDescription_Dump(AP4_ProtectedSampleDescription& desc, bool verbose)
+{
+    printf("    [ENCRYPTED]\n");
+    char coding[5];
+    AP4_FormatFourChars(coding, desc.GetFormat());
+    printf("      Coding:         %s\n", coding);
+    AP4_UI32 st = desc.GetSchemeType();
+    printf("      Scheme Type:    %c%c%c%c\n", 
+        (char)((st>>24) & 0xFF),
+        (char)((st>>16) & 0xFF),
+        (char)((st>> 8) & 0xFF),
+        (char)((st    ) & 0xFF));
+    printf("      Scheme Version: %d\n", desc.GetSchemeVersion());
+    printf("      Scheme URI:     %s\n", desc.GetSchemeUri().GetChars());
+    AP4_ProtectionSchemeInfo* scheme_info = desc.GetSchemeInfo();
+    if (scheme_info == NULL) return;
+    AP4_ContainerAtom* schi = scheme_info->GetSchiAtom();
+    if (schi == NULL) return;
+   // ShowProtectionSchemeInfo_Text(desc.GetSchemeType(), *schi, verbose);
+}
+
+
 
 /*----------------------------------------------------------------------
 |   main
@@ -443,7 +465,7 @@ main(int argc, char** argv)
     Options.playlist_hls_version       = 3;
     Options.input                      = NULL;
     Options.ainput[0]                  = NULL;
-    Options.output                     = "-stdout";
+    Options.output                     = "/tmp/res.ts";//"-stdout";
     Options.segment_duration_threshold = DefaultSegmentDurationThreshold;
     Options.pcr_offset                 = AP4_MPEG2_TS_DEFAULT_PCR_OFFSET;
     int num_audio = 0;
@@ -641,6 +663,7 @@ main(int argc, char** argv)
             video_reader = new TrackSampleReader(*video_track);
         }
     }
+
     
     // create an MPEG2 TS Writer
     AP4_Mpeg2TsWriter writer(Options.pmt_pid);
@@ -671,13 +694,35 @@ main(int argc, char** argv)
     		
     		unsigned int stream_type = 0;
     		unsigned int stream_id   = 0;
-    		if (asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_MP4A) {
+
+            auto sample_descr = asample_description[i]->GetType();
+            auto sample_format = asample_description[i]->GetFormat();
+            
+            if (sample_descr == AP4_SampleDescription::TYPE_PROTECTED) {
+                AP4_ProtectedSampleDescription* prot_desc = AP4_DYNAMIC_CAST(AP4_ProtectedSampleDescription, asample_description[i]);
+                if (prot_desc == nullptr) {
+                    fprintf(stderr, "ERROR: in enc-audio codec : ProtectedSampleDescription could not be found \n"); 
+                    return 1;
+                }
+
+                sample_format = prot_desc->GetFormat();
+                ProtectedSampleDescription_Dump(*prot_desc, false);
+                auto desc = prot_desc->GetOriginalSampleDescription();
+
+                if (sample_format != AP4_ATOM_TYPE_ENCA) {
+                    fprintf(stderr, "ERROR: in enc-audio codec :should be ausio encription\n"); 
+                }
+            }
+
+    		if (sample_format== AP4_SAMPLE_FORMAT_MP4A) {
     			stream_type = AP4_MPEG2_STREAM_TYPE_ISO_IEC_13818_7;
     			stream_id   = AP4_MPEG2_TS_DEFAULT_STREAM_ID_AUDIO;
-    		} else if (asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_AC_3) {
+    		}  else if (sample_format == AP4_ATOM_TYPE_ENCA) {
+                // nope
+            } else if (sample_format == AP4_SAMPLE_FORMAT_AC_3) {
     			stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_AC3;
     			stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
-    		} else if ( asample_description[i]->GetFormat() == AP4_SAMPLE_FORMAT_EC_3) {
+    		} else if (sample_format == AP4_SAMPLE_FORMAT_EC_3) {
     			stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_EAC3;
     			stream_id   = AP4_MPEG2_TS_STREAM_ID_PRIVATE_STREAM_1;
     		} else {
@@ -687,7 +732,7 @@ main(int argc, char** argv)
     				(asample_description[i]->GetFormat()) & 0xFF);
     			return 1;
     		}
-    		
+                		
     		result = writer.SetAudioStream(audio_track[i]->GetMediaTimeScale(),
     			stream_type,
     			stream_id,
@@ -699,6 +744,7 @@ main(int argc, char** argv)
     			fprintf(stderr, "could not create audio stream (%d)\n", result);
     			goto end;
     		}
+
     	}
     }
     
@@ -709,7 +755,7 @@ main(int argc, char** argv)
             fprintf(stderr, "ERROR: unable to parse video sample description\n");
             goto end;
         }
-        
+
         // decide on the stream type
         unsigned int stream_type = 0;
         unsigned int stream_id   = AP4_MPEG2_TS_DEFAULT_STREAM_ID_VIDEO;
@@ -725,13 +771,23 @@ main(int argc, char** argv)
                    sample_description->GetFormat() == AP4_SAMPLE_FORMAT_DVHE ||
                    sample_description->GetFormat() == AP4_SAMPLE_FORMAT_DVH1) {
             stream_type = AP4_MPEG2_STREAM_TYPE_HEVC;
+        } else if (sample_description->GetFormat() == AP4_ATOM_TYPE_ENCV) {
+                auto avcc = get_avcc(video_track->UseTrakAtom());
+                if (avcc == nullptr) {
+                    goto end;
+                }
+                stream_type = AP4_MPEG2_STREAM_TYPE_AVC;
+
         } else {
             fprintf(stderr, "ERROR: video codec %s (%c%c%c%c) not supported\n", 
             	    AP4_GetFormatName(sample_description->GetFormat()), (sample_description->GetFormat() >> 24) & 0xFF,
     				(sample_description->GetFormat() >> 16) & 0xFF, (sample_description->GetFormat() >> 8) & 0xFF,
     				(sample_description->GetFormat()) & 0xFF);
-            return 1;
+            //return 1;
         }
+
+        
+
         result = writer.SetVideoStream(video_track->GetMediaTimeScale(),
                                        stream_type,
                                        stream_id,

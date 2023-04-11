@@ -1274,6 +1274,7 @@ WriteSamples(AP4_Mpeg2TsWriter*               ts_writer,
                 result = audio_stream->WriteSample(audio_sample,
                                                    audio_sample_data,
                                                    audio_track->GetSampleDescription(audio_sample.GetDescriptionIndex()), 
+                                                   nullptr,
                                                    video_track==NULL, 
                                                    *segment_output);
             } else if (packed_writer) {
@@ -1305,6 +1306,7 @@ WriteSamples(AP4_Mpeg2TsWriter*               ts_writer,
             result = video_stream->WriteSample(video_sample,
                                                video_sample_data, 
                                                video_track->GetSampleDescription(video_sample.GetDescriptionIndex()),
+                                               nullptr,
                                                true, 
                                                *segment_output);
             if (AP4_FAILED(result)) return result;

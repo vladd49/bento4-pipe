@@ -36,6 +36,9 @@
 #include "Ap4Utils.h"
 #include "Ap4Mp4AudioInfo.h"
 #include "Ap4AvcParser.h"
+#include "Ap4Protection.h"
+#include "Ap4DynamicCast.h"
+#include <iostream>
 
 /*----------------------------------------------------------------------
 |   constants
@@ -373,6 +376,7 @@ public:
     AP4_Result WriteSample(AP4_Sample&            sample,
                            AP4_DataBuffer&        sample_data, 
                            AP4_SampleDescription* sample_description,
+                           AP4_AvccAtom*          avcc_atom,
                            bool                   with_pcr, 
                            AP4_ByteStream&        output);
     
@@ -417,6 +421,7 @@ AP4_Result
 AP4_Mpeg2TsAudioSampleStream::WriteSample(AP4_Sample&            sample,
                                           AP4_DataBuffer&        sample_data,
                                           AP4_SampleDescription* sample_description,
+                                          AP4_AvccAtom*          avcc_atom,
                                           bool                   with_pcr, 
                                           AP4_ByteStream&        output)
 {
@@ -428,11 +433,15 @@ AP4_Mpeg2TsAudioSampleStream::WriteSample(AP4_Sample&            sample,
     if (sample_description->GetFormat() == AP4_SAMPLE_FORMAT_MP4A) {
         AP4_MpegAudioSampleDescription* audio_desc = AP4_DYNAMIC_CAST(AP4_MpegAudioSampleDescription, sample_description);
         
-        if (audio_desc == NULL) return AP4_ERROR_NOT_SUPPORTED;
+        if (audio_desc == NULL) { 
+            return AP4_ERROR_NOT_SUPPORTED;
+        }
+
         if (audio_desc->GetMpeg4AudioObjectType() != AP4_MPEG4_AUDIO_OBJECT_TYPE_AAC_LC   &&
             audio_desc->GetMpeg4AudioObjectType() != AP4_MPEG4_AUDIO_OBJECT_TYPE_AAC_MAIN &&
             audio_desc->GetMpeg4AudioObjectType() != AP4_MPEG4_AUDIO_OBJECT_TYPE_SBR      &&
             audio_desc->GetMpeg4AudioObjectType() != AP4_MPEG4_AUDIO_OBJECT_TYPE_PS) {
+
             return AP4_ERROR_NOT_SUPPORTED;
         }
         
@@ -461,7 +470,25 @@ AP4_Mpeg2TsAudioSampleStream::WriteSample(AP4_Sample&            sample,
                sample_description->GetFormat() == AP4_SAMPLE_FORMAT_AC_4) {
         AP4_UI64 ts = AP4_ConvertTime(sample.GetDts(), m_TimeScale, 90000);
         WritePES(sample_data.GetData(), sample_data.GetDataSize(), ts, false, ts, with_pcr, output, false);
-    } else {
+    } else if (sample_description->GetFormat() == AP4_ATOM_TYPE_ENCA) {
+        AP4_ProtectedSampleDescription* prot_desc = AP4_DYNAMIC_CAST(AP4_ProtectedSampleDescription, sample_description);
+
+        AP4_ProtectionSchemeInfo* scheme_info = prot_desc->GetSchemeInfo();
+        if (scheme_info == nullptr) {
+             return AP4_ERROR_NOT_SUPPORTED;
+        }
+
+
+        unsigned int channel_configuration   = 2;
+        unsigned int sampling_frequency_index = GetSamplingFrequencyIndex(24000);
+
+        unsigned char* buffer = new unsigned char[7+sample_data.GetDataSize()];
+        MakeAdtsHeader(buffer, sample_data.GetDataSize(), sampling_frequency_index, channel_configuration);
+        AP4_CopyMemory(buffer+7, sample_data.GetData(), sample_data.GetDataSize());
+        AP4_UI64 ts = AP4_ConvertTime(sample.GetDts(), m_TimeScale, 90000);
+        WritePES(buffer, 7+sample.GetSize(), ts, false, ts, with_pcr, output, false);
+        delete[] buffer;
+    } else  {
         return AP4_ERROR_NOT_SUPPORTED;
     }
 
@@ -486,6 +513,7 @@ public:
     AP4_Result WriteSample(AP4_Sample&            sample,
                            AP4_DataBuffer&        sample_data,
                            AP4_SampleDescription* sample_description,
+                           AP4_AvccAtom*          avcc_atom,
                            bool                   with_pcr, 
                            AP4_ByteStream&        output);
     
@@ -532,6 +560,7 @@ AP4_Mpeg2TsVideoSampleStream::Create(AP4_UI16                          pid,
     return AP4_SUCCESS;
 }
 
+
 /*----------------------------------------------------------------------
 |   AP4_Mpeg2TsVideoSampleStream::WriteSample
 +---------------------------------------------------------------------*/
@@ -539,9 +568,12 @@ AP4_Result
 AP4_Mpeg2TsVideoSampleStream::WriteSample(AP4_Sample&            sample,
                                           AP4_DataBuffer&        sample_data, 
                                           AP4_SampleDescription* sample_description,
+                                          AP4_AvccAtom*          avcc_atom,
                                           bool                   with_pcr, 
                                           AP4_ByteStream&        output)
 {
+    
+    
     if (!sample_description) {
         return AP4_ERROR_INVALID_PARAMETERS;
     }
@@ -570,6 +602,41 @@ AP4_Mpeg2TsVideoSampleStream::WriteSample(AP4_Sample&            sample,
             }
             for (unsigned int i=0; i<avc_desc->GetPictureParameters().ItemCount(); i++) {
                 AP4_DataBuffer& buffer = avc_desc->GetPictureParameters()[i];
+                unsigned int prefix_size = m_Prefix.GetDataSize();
+                m_Prefix.SetDataSize(prefix_size+4+buffer.GetDataSize());
+                unsigned char* p = m_Prefix.UseData()+prefix_size;
+                *p++ = 0;
+                *p++ = 0;
+                *p++ = 0;
+                *p++ = 1;
+                AP4_CopyMemory(p, buffer.GetData(), buffer.GetDataSize());
+            }
+        }
+    }  else if (sample_description->GetType() == AP4_SampleDescription::TYPE_PROTECTED) {
+
+        if (avcc_atom == nullptr) {
+            return AP4_ERROR_NOT_SUPPORTED;
+        }
+
+        if ((int)sample.GetDescriptionIndex() != m_SampleDescriptionIndex) {
+            m_SampleDescriptionIndex = (int)sample.GetDescriptionIndex();
+
+            m_NaluLengthSize =  avcc_atom->GetNaluLengthSize();
+            m_Prefix.SetDataSize(0);
+
+            for (unsigned int i=0; i<avcc_atom->GetSequenceParameters().ItemCount(); i++) {
+                AP4_DataBuffer& buffer = avcc_atom->GetSequenceParameters()[i];
+                unsigned int prefix_size = m_Prefix.GetDataSize();
+                m_Prefix.SetDataSize(prefix_size+4+buffer.GetDataSize());
+                unsigned char* p = m_Prefix.UseData()+prefix_size;
+                *p++ = 0;
+                *p++ = 0;
+                *p++ = 0;
+                *p++ = 1;
+                AP4_CopyMemory(p, buffer.GetData(), buffer.GetDataSize());
+            }
+            for (unsigned int i=0; i< avcc_atom->GetPictureParameters().ItemCount(); i++) {
+                AP4_DataBuffer& buffer = avcc_atom->GetPictureParameters()[i];
                 unsigned int prefix_size = m_Prefix.GetDataSize();
                 m_Prefix.SetDataSize(prefix_size+4+buffer.GetDataSize());
                 unsigned char* p = m_Prefix.UseData()+prefix_size;
@@ -684,7 +751,7 @@ AP4_Mpeg2TsVideoSampleStream::WriteSample(AP4_Sample&            sample,
         if (nalu_size > data_size) break;
         
         // check if we need to add a delimiter before the NALU
-        if (nalu_count == 0 && sample_description->GetType() == AP4_SampleDescription::TYPE_AVC) {
+        if (nalu_count == 0 && ( sample_description->GetType() == AP4_SampleDescription::TYPE_AVC || sample_description->GetType() == AP4_SampleDescription::TYPE_PROTECTED)) {
             if (data_size < 1) break;
             if (/* nalu_size != 2 || */ (data[0] & 0x1F) != AP4_AVC_NAL_UNIT_TYPE_ACCESS_UNIT_DELIMITER) {
                 // the first NAL unit is not an Access Unit Delimiter, we need to add one
@@ -945,6 +1012,7 @@ AP4_Mpeg2TsWriter::SetVideoStream(AP4_UI32        timescale,
 AP4_Result 
 AP4_Mpeg2TsWriter::SampleStream::WriteSample(AP4_Sample&            sample, 
                                              AP4_SampleDescription* sample_description,
+                                             AP4_AvccAtom*          avcc_atom,
                                              bool                   with_pcr, 
                                              AP4_ByteStream&        output)
 {
@@ -954,6 +1022,7 @@ AP4_Mpeg2TsWriter::SampleStream::WriteSample(AP4_Sample&            sample,
     return WriteSample(sample,
                        sample_data,
                        sample_description,
+                       avcc_atom,
                        with_pcr,
                        output);
 }

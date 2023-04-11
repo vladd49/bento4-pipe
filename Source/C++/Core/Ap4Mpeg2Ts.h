@@ -34,6 +34,7 @@
 +---------------------------------------------------------------------*/
 #include "Ap4Types.h"
 #include "Ap4DataBuffer.h"
+#include "Ap4AvccAtom.h"
 
 /*----------------------------------------------------------------------
 |   classes
@@ -124,11 +125,14 @@ public:
         virtual AP4_Result WriteSample(AP4_Sample&            sample,
                                        AP4_DataBuffer&        sample_data,
                                        AP4_SampleDescription* sample_description,
+                                       AP4_AvccAtom*          avcc_atom,
                                        bool                   with_pcr, 
                                        AP4_ByteStream&        output) = 0;
 
+
         AP4_Result WriteSample(AP4_Sample&            sample, 
                                AP4_SampleDescription* sample_description,
+                               AP4_AvccAtom*          avcc_atom,
                                bool                   with_pcr, 
                                AP4_ByteStream&        output);
         

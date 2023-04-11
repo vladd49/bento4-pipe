@@ -267,6 +267,8 @@ AP4_CencCbcsSubSampleMapper::AP4_CencCbcsSubSampleMapper(AP4_Size nalu_length_si
         if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc2/avcC"));
         if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc3/avcC"));
         if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("avc4/avcC"));
+        if (!avcc)    avcc = AP4_DYNAMIC_CAST(AP4_AvccAtom, stsd->FindChild("encv/avcC"));
+
         if (!avcc)    return;
         
         // parse the sps and pps if we have them
