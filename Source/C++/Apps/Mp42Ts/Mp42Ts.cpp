@@ -424,18 +424,18 @@ end:
 
 static void ProtectedSampleDescription_Dump(AP4_ProtectedSampleDescription& desc, bool verbose)
 {
-    printf("    [ENCRYPTED]\n");
+    fprintf(stderr, "    [ENCRYPTED]\n");
     char coding[5];
     AP4_FormatFourChars(coding, desc.GetFormat());
-    printf("      Coding:         %s\n", coding);
+    fprintf(stderr, "      Coding:         %s\n", coding);
     AP4_UI32 st = desc.GetSchemeType();
-    printf("      Scheme Type:    %c%c%c%c\n", 
+    fprintf(stderr, "      Scheme Type:    %c%c%c%c\n", 
         (char)((st>>24) & 0xFF),
         (char)((st>>16) & 0xFF),
         (char)((st>> 8) & 0xFF),
         (char)((st    ) & 0xFF));
-    printf("      Scheme Version: %d\n", desc.GetSchemeVersion());
-    printf("      Scheme URI:     %s\n", desc.GetSchemeUri().GetChars());
+    fprintf(stderr, "      Scheme Version: %d\n", desc.GetSchemeVersion());
+    fprintf(stderr, "      Scheme URI:     %s\n", desc.GetSchemeUri().GetChars());
     AP4_ProtectionSchemeInfo* scheme_info = desc.GetSchemeInfo();
     if (scheme_info == NULL) return;
     AP4_ContainerAtom* schi = scheme_info->GetSchiAtom();
@@ -465,7 +465,8 @@ main(int argc, char** argv)
     Options.playlist_hls_version       = 3;
     Options.input                      = NULL;
     Options.ainput[0]                  = NULL;
-    Options.output                     = "/tmp/res.ts";//"-stdout";
+    //Options.output                     = "/tmp/res.ts";//"-stdout";
+    Options.output                     = "-stdout";
     Options.segment_duration_threshold = DefaultSegmentDurationThreshold;
     Options.pcr_offset                 = AP4_MPEG2_TS_DEFAULT_PCR_OFFSET;
     int num_audio = 0;
@@ -712,12 +713,14 @@ main(int argc, char** argv)
                 if (sample_format != AP4_ATOM_TYPE_ENCA) {
                     fprintf(stderr, "ERROR: in enc-audio codec :should be ausio encription\n"); 
                 }
+
+		sample_format = desc->GetFormat();
             }
 
     		if (sample_format== AP4_SAMPLE_FORMAT_MP4A) {
     			stream_type = AP4_MPEG2_STREAM_TYPE_ISO_IEC_13818_7;
     			stream_id   = AP4_MPEG2_TS_DEFAULT_STREAM_ID_AUDIO;
-    		}  else if (sample_format == AP4_ATOM_TYPE_ENCA) {
+    		//}  else if (sample_format == AP4_ATOM_TYPE_ENCA) {
                 // nope
             } else if (sample_format == AP4_SAMPLE_FORMAT_AC_3) {
     			stream_type = AP4_MPEG2_STREAM_TYPE_ATSC_AC3;
